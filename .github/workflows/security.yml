@@ -1,0 +1,220 @@
+name: Portal security pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  secrets:
+    name: Secrets - Gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Scan current source files
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -v "$PWD/reports:/reports" \
+            ghcr.io/gitleaks/gitleaks:v8.24.2 \
+            dir /repo \
+            --config /repo/.gitleaks.toml \
+            --redact \
+            --report-format json \
+            --report-path /reports/gitleaks.json \
+            --exit-code 1
+
+      - name: Save secret scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: secret-report
+          path: reports/
+          retention-days: 14
+
+  dependencies:
+    name: SCA - Trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Prepare dependency scan
+        run: |
+          mkdir -p reports "$RUNNER_TEMP/sca"
+          cp requirements.hardened.txt "$RUNNER_TEMP/sca/requirements.txt"
+
+      - name: Scan declared dependencies
+        run: |
+          docker run --rm \
+            -v "$RUNNER_TEMP/sca:/src:ro" \
+            -v "$PWD/reports:/reports" \
+            -v trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.76.1 \
+            fs --scanners vuln --exit-code 0 \
+            --format json --output /reports/sca.json /src
+
+      - name: Block Critical dependency vulnerabilities
+        run: |
+          docker run --rm \
+            -v "$RUNNER_TEMP/sca:/src:ro" \
+            -v trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.76.1 \
+            fs --scanners vuln \
+            --severity CRITICAL --exit-code 1 /src
+
+      - name: Save dependency report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dependency-report
+          path: reports/
+          retention-days: 14
+
+  sast:
+    name: SAST - Bandit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install Bandit in isolated environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bandit"
+          "$RUNNER_TEMP/bandit/bin/pip" install bandit==1.8.6
+          mkdir -p reports
+
+      - name: Report all code findings
+        run: |
+          "$RUNNER_TEMP/bandit/bin/bandit" \
+            app.py --format json \
+            --output reports/bandit.json --exit-zero
+          cat reports/bandit.json
+
+      - name: Block High severity code findings
+        run: |
+          "$RUNNER_TEMP/bandit/bin/bandit" \
+            app.py --severity-level high
+
+      - name: Save code report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sast-report
+          path: reports/
+          retention-days: 14
+
+  iac:
+    name: IaC - Checkov
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Check Dockerfile configuration
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$PWD:/work:ro" \
+            bridgecrew/checkov:3.4.3 \
+            --file /work/Dockerfile.hardened \
+            --framework dockerfile \
+            --compact --skip-download \
+            2>&1 | tee reports/checkov.txt
+
+      - name: Save configuration report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: iac-report
+          path: reports/
+          retention-days: 14
+
+  container:
+    name: Build - Container scan - SBOM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Build local test image
+        run: |
+          mkdir -p reports
+          docker build \
+            -f Dockerfile.hardened \
+            -t vejo-portal:ci .
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/reports:/reports" \
+            aquasec/trivy:0.76.1 \
+            image --image-src docker \
+            --format cyclonedx \
+            --output /reports/sbom.cdx.json \
+            vejo-portal:ci
+
+      - name: Report all image vulnerabilities
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/reports:/reports" \
+            -v trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.76.1 \
+            image --image-src docker \
+            --scanners vuln --exit-code 0 \
+            --format json --output /reports/image.json \
+            vejo-portal:ci
+
+      - name: Block Critical image vulnerabilities
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.76.1 \
+            image --image-src docker \
+            --scanners vuln \
+            --severity CRITICAL --exit-code 1 \
+            vejo-portal:ci
+
+      - name: Save image report and SBOM
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-report-and-sbom
+          path: reports/
+          retention-days: 14
+
+  deploy:
+    name: Quality gate - Simulated deploy
+    needs: [secrets, dependencies, sast, iac, container]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Confirm successful security checks
+        run: |
+          echo "All required security checks passed."
+          echo "Deployment is simulated. No image is published."

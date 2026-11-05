@@ -1,0 +1,10 @@
+title = "VejoEnergija secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "lab-fake-api-key"
+description = "Educational fake API key"
+regex = '''AKIA[A-Z0-9]{14,20}'''
+keywords = ["AKIA"]
