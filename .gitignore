@@ -1,0 +1,17 @@
+# Vietiniai slapti duomenys
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# Python laikini failai ir virtuali aplinka
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Vietiniai konteinerių archyvai ir ataskaitos
+*.tar
+reports/
