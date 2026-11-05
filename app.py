@@ -1,8 +1,5 @@
 from flask import Flask, jsonify
 
-# Netikras raktas, skirtas tik CI/CD saugumo patikrai.
-DEMO_API_KEY = "AKIAFAKEFAKEFAKE1234"
-
 app = Flask(__name__)
 
 @app.get("/")
@@ -21,6 +18,7 @@ def portal():
 def health():
     return jsonify(status="ok")
 
-# Tycia nesaugus pavyzdys SAST patikrai.
+# SQL tekstas ir parametro reiksme perduodami atskirai.
 def build_user_query(username):
-    return "SELECT * FROM users WHERE username = '" + username + "'"
+    query = "SELECT * FROM users WHERE username = ?"
+    return query, (username,)
